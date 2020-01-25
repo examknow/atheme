@@ -181,6 +181,94 @@ detach_console(int *daemonize_pipe)
 #endif
 }
 
+static int ATHEME_FATTR_PRINTF(3, 4)
+test_vsnprintf_iso_c99_driver(char *const restrict buf, const size_t len, const char *const restrict fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	const int result = vsnprintf(buf, len, fmt, ap);
+	va_end(ap);
+	return result;
+}
+
+static bool
+test_vsnprintf_iso_c99(void)
+{
+	const long double fourty_two_ld = 42.0L;
+	const size_t fourty_two_sz = 42U;
+	char buf[BUFSIZE];
+
+	/* To keep Valgrind etc happy (uninitialised memory access in strncmp(3) below?)
+	 * We also don't use null bytes, to verify that vsnprintf(3) writes those too.
+	 */
+	(void) memset(buf, 0xFF, sizeof buf);
+
+	/* C99 vsnprintf(3) should return the number of characters it /would've/ written, even with a short buffer.
+	 * This also tests whether C99 format token 'LF' (long double) and field width specifiers work correctly.
+	 */
+	if (test_vsnprintf_iso_c99_driver(buf, 14U, "The answer is %27.2LF.", fourty_two_ld) != 42)
+		return false;
+
+	/* It should also return that for a buffer size of zero; *and* not write to the buffer at all in this case.
+	 * This also tests whether C99 format token 'zu' (size_t) and field width specifiers work correctly.
+	 */
+	if (test_vsnprintf_iso_c99_driver(buf, 0U, "No, it's %32zu.", fourty_two_sz) != 42)
+		return false;
+
+	// Verify that the first time was truncated correctly, and that the second time didn't write at all.
+	if (strncmp(buf, "The answer is", 14U) != 0)
+		return false;
+
+	return true;
+}
+
+static bool
+test_snprintf_iso_c99(void)
+{
+	// This is the same as above but for snprintf(3) instead
+
+	const long double fourty_two_ld = 42.0L;
+	const size_t fourty_two_sz = 42U;
+	char buf[BUFSIZE];
+
+	(void) memset(buf, 0xFF, sizeof buf);
+
+	if (snprintf(buf, 14U, "The answer is %27.2LF.", fourty_two_ld) != 42)
+		return false;
+
+	if (snprintf(buf, 0U, "No, it's %32zu.", fourty_two_sz) != 42)
+		return false;
+
+	if (strncmp(buf, "The answer is", 14U) != 0)
+		return false;
+
+	return true;
+}
+
+#ifdef ENABLE_NLS
+static bool
+test_vsnprintf_iso_c99_positional(void)
+{
+	char buf[BUFSIZE];
+
+	(void) memset(buf, 0xFF, sizeof buf);
+	(void) test_vsnprintf_iso_c99_driver(buf, sizeof buf, "%3$s %1$s %4$u %2$s", "foo", "bar", "baz", 42U);
+
+	return (strcmp(buf, "baz foo 42 bar") == 0);
+}
+
+static bool
+test_snprintf_iso_c99_positional(void)
+{
+	char buf[BUFSIZE];
+
+	(void) memset(buf, 0xFF, sizeof buf);
+	(void) snprintf(buf, sizeof buf, "%3$s %1$s %4$u %2$s", "foo", "bar", "baz", 42U);
+
+	return (strcmp(buf, "baz foo 42 bar") == 0);
+}
+#endif
+
 bool ATHEME_FATTR_WUR
 libathemecore_early_init(void)
 {
@@ -189,22 +277,52 @@ libathemecore_early_init(void)
 	if (libathemecore_early_init_done)
 		return true;
 
+	// This software requires a C99 compiler
+	if (! test_vsnprintf_iso_c99())
+	{
+		(void) fprintf(stderr, "Your vsnprintf(3) is not C99-compliant; please build with a C99 compiler.\n");
+		return false;
+	}
+	if (! test_snprintf_iso_c99())
+	{
+		(void) fprintf(stderr, "Your snprintf(3) is not C99-compliant; please build with a C99 compiler.\n");
+		return false;
+	}
+
 #ifdef ENABLE_NLS
-	/* Prepare gettext */
-	if (! setlocale(LC_ALL, ""))
+	/* For translations to make any sense most of the time, the order of words or values has to be changed.
+	 * Here we verify that does work, so that we can decide whether to enable translations or not.
+	 * If it doesn't work, there's no point enabling translations, because the output will be garbage.
+	 */
+	if (! test_vsnprintf_iso_c99_positional())
 	{
-		(void) perror("setlocale(3)");
-		return false;
+		(void) fprintf(stderr, "Your vsnprintf(3) does not support positional format tokens!\n");
+		(void) fprintf(stderr, "Not enabling language support. Build with '--disable-nls' to silence.\n");
 	}
-	if (! textdomain(PACKAGE_TARNAME))
+	else if (! test_snprintf_iso_c99_positional())
 	{
-		(void) perror("textdomain(3)");
-		return false;
+		(void) fprintf(stderr, "Your snprintf(3) does not support positional format tokens!\n");
+		(void) fprintf(stderr, "Not enabling language support. Build with '--disable-nls' to silence.\n");
 	}
-	if (! bindtextdomain(PACKAGE_TARNAME, LOCALEDIR))
+	else
 	{
-		(void) perror("bindtextdomain(3)");
-		return false;
+		if (! setlocale(LC_ALL, ""))
+		{
+			(void) perror("setlocale(3)");
+			return false;
+		}
+		if (! bindtextdomain(PACKAGE_TARNAME, LOCALEDIR))
+		{
+			(void) perror("bindtextdomain(3)");
+			return false;
+		}
+		if (! textdomain(PACKAGE_TARNAME))
+		{
+			(void) perror("textdomain(3)");
+			return false;
+		}
+
+		(void) languages_set_available(true);
 	}
 #endif /* ENABLE_NLS */
 
